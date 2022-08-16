@@ -1,0 +1,386 @@
+---
+title: "Plots & Figures"
+author:
+  - Bénédicte Colnet [Inria, Paris-Saclay]
+date: "June 2022"
+output:
+  html_document:
+    code_folding: "hide"
+    number_sections: no
+    toc: yes
+    toc_depth: 2
+  pdf_document:
+    toc: yes
+abstract: | 
+  This script reproduces all the plots from the paper entitled "Reweighting the RCT for generalization: finite sample analysis and variable selection". For simulatiosn, data are generated with separate scripts and outputs are stored in the folder entitled "results". This notebook only reads these results except for small additional illustrative Figures or simulations.
+---
+ 
+```{r setup, include=T}
+knitr::opts_chunk$set(echo = TRUE)
+
+set.seed(123)
+
+# libraries
+library(MASS) # simulations
+library(ggplot2) # plots
+library(tidyr) # pivot longer or wider
+library(dplyr) # case_when and others
+library(ggridges)
+
+source("./estimators.R")
+source("./generateDGPs.R")
+
+options(dplyr.summarise.inform = FALSE)
+
+TARGET.ATE =  0.3*10+0.7*5
+```
+
+
+# Data generative process visualization
+
+
+```{r}
+N.for.plot = 15000
+
+p.Y0 <- rnorm(n = N.for.plot, mean = 0, sd = 1)
+p.Y1.X1 <- rnorm(n = N.for.plot, mean = 10, sd = 1)
+p.Y1.X0 <- rnorm(n = N.for.plot, mean = 5, sd = 1)
+
+DGP.for.plot <- data.frame("Y" = c(p.Y0, p.Y1.X1, p.Y1.X0),
+                           "DGP" = c(rep("any X, Y(0)", N.for.plot), 
+                                     rep("X = 1, Y(1)", N.for.plot), 
+                                     rep("X = 0, Y(1)", N.for.plot)))
+```
+
+
+```{r}
+ggplot(DGP.for.plot, aes(x = Y, y = DGP, group = DGP, fill = DGP)) + 
+  geom_density_ridges(alpha = 0.6) +
+  theme_classic() + 
+  scale_fill_manual(values=c("#A2A399", "#149AD8", "#E69F00"), name = "") +
+  xlab("Y") +
+  ylab("Density") +
+  theme(legend.position="none") +
+  #theme(legend.position = c(0.82, 0.274)) +
+  #theme( legend.text = element_text(size = 8, face = "bold")) +
+  annotate(geom="text", x=15, y=1.3, label='atop(bold("Y(0)"))', size = 5, parse = TRUE) +
+  annotate(geom="text", x=15, y=2.4, label='atop(bold("Y(1) | X = 0"))', size = 5, color = "darkblue", parse = TRUE) +
+  annotate(geom="text", x=15, y=3.4, label='atop(bold("Y(1) | X = 1"))', size = 5, color = "darkorange", parse = TRUE) +
+  xlim(-2, 17) +
+  theme(axis.text.y=element_blank(),
+        axis.ticks.y=element_blank()) 
+
+ggsave("./fig/toy_example_response_level.pdf", width = 4, height = 5)
+```
+
+```{r}
+simulated.RCT <- toy.example(n = 150, m = 100, noisier.var.X1 = T, factor.var = 2)
+```
+
+```{r}
+# focus on trial
+simulated.RCT <- simulated.RCT[simulated.RCT$S == 1,]
+
+# overall effect
+estimated.ATE <- difference.in.means(simulated.RCT)
+estimated.ATE.CI <- t.test(simulated.RCT[simulated.RCT$A == 1, "Y"], simulated.RCT[simulated.RCT$A == 0, "Y"])$conf.int
+
+# X = 1
+estimated.ATE.X.1 <- difference.in.means(simulated.RCT[simulated.RCT$X == 1,])
+estimated.ATE.X.1.CI <- t.test(simulated.RCT[simulated.RCT$A == 1 & simulated.RCT$X == 1, "Y"], simulated.RCT[simulated.RCT$A == 0 & simulated.RCT$X == 1, "Y"])$conf.int
+
+# X = 0
+estimated.ATE.X.0 <- difference.in.means(simulated.RCT[simulated.RCT$X == 0,])
+estimated.ATE.X.0.CI <- t.test(simulated.RCT[simulated.RCT$A == 1 & simulated.RCT$X == 0, "Y"], simulated.RCT[simulated.RCT$A == 0 & simulated.RCT$X == 0, "Y"])$conf.int
+
+
+ate.stratified <- data.frame("ATE" = c(estimated.ATE, estimated.ATE.X.1, estimated.ATE.X.0),
+                             "conf.inf" = c(estimated.ATE.CI[[1]], estimated.ATE.X.1.CI[[1]], estimated.ATE.X.0.CI[[1]]),
+                             "conf.sup" = c(estimated.ATE.CI[[2]], estimated.ATE.X.1.CI[[2]], estimated.ATE.X.0.CI[[2]]),
+                             "Strata" = c("All individuals", "X=1", "X=0"))
+```
+
+```{r}
+ggplot(ate.stratified, aes(x = Strata, y = ATE, color = Strata)) +
+  geom_point(size = 3.5) +
+  geom_errorbar(aes(ymin=conf.inf, ymax=conf.sup), width=.2,
+                 position=position_dodge(0.05), size = 1.5) +
+  theme_minimal() + 
+  #coord_flip() +
+  xlab("") +
+  ylab("Estimated effect") +
+  theme(axis.text.x = element_text(size= 14, face="bold", color = "black"),
+        axis.text.y = element_text(size= 11, face="bold", color = "black"),
+        legend.position = "none") + 
+  scale_color_manual(values=c("#222027",  "#56B4E9", "#E69F00")) 
+ggsave("./fig/toy-example-stratification.png", width = 4, height = 3)
+```
+
+
+# Simple simulation to illustrate it works and compare $\pi$ and $\hat \pi$
+
+
+```{r}
+toy.example.pi.hat.or.not <- data.frame("estimate" = c(),
+                                        "estimator" = c(),
+                                        "estimating.pi" = c())
+
+
+for (i in 1:1000){
+  
+  # generate data
+  simulation <- toy.example(n = 150, m = 1000, output.oracles = F, symetric.po = F, noisier.var.X1 = F, factor.var = 0)
+  
+  ipsw.pi.oracle <- ipsw.univariate.and.categorical.X(dataframe = simulation, estimand = "ATE", oracle.e = T, oracle.pt = F, oracle.pr = F)
+  
+  ipsw.pi.hat <- ipsw.univariate.and.categorical.X(dataframe = simulation, estimand = "ATE", oracle.e = F, oracle.pt = F, oracle.pr = F)
+  
+  ht <- difference.in.means(dataframe = simulation, estimand = "ATE", oracle.e.too = T)
+  
+  dm  <- difference.in.means(dataframe = simulation, estimand = "ATE", oracle.e.too = F)
+  
+  
+  new.row <- data.frame("estimate" = c(ipsw.pi.oracle, ipsw.pi.hat, ht, dm),
+                        "estimator" = c("Re-weighted RCT \n (Equation 2) \n ", "Re-weighted RCT \n (Def. 9) \n " , "Horvitz-Thomson \n (Equation 1) \n ", "Difference-in-means"),
+                        "estimating.pi" = c("Oracle pi","Estimated pi","Oracle pi","Estimated pi"))
+  
+  toy.example.pi.hat.or.not <- rbind(toy.example.pi.hat.or.not, new.row)
+}
+```
+
+```{r}
+toy.example.pi.hat.or.not$estimator <- factor(toy.example.pi.hat.or.not$estimator , levels = c("Horvitz-Thomson \n (Equation 1) \n ", "Difference-in-means", "Re-weighted RCT \n (Equation 2) \n ", "Re-weighted RCT \n (Def. 9) \n "))
+```
+
+
+```{r}
+ggplot(toy.example.pi.hat.or.not[toy.example.pi.hat.or.not$estimator != "Difference-in-means", ], aes(x = estimator, y = estimate, fill = estimator)) +
+  geom_boxplot(alpha = 0.8) +
+  #geom_hline(aes(yintercept = 0.3*10+0.7*5, linetype = "ATE in Target population"),  size = 1, linetype = "dashed", color = "#EA471F",  show.legend =TRUE) + 
+ # geom_hline(aes(yintercept = 0.75*10+0.25*5, linetype = "ATE in Trial population"), size = 1, linetype="dashed", color = "#475E96",  show.legend =TRUE)  +
+  theme_minimal() +
+  scale_fill_manual(values=c("#999999","#E69F00", "#EC420B")) +
+  geom_hline(aes(yintercept = TARGET.ATE, color = "Population ATE"),  
+               size = 0.9, linetype="dashed") +
+  geom_hline(aes(yintercept = 0.75*10+0.25*5, color = "Trial ATE"), 
+               size = 0.9, linetype="dashed") +
+    xlab("") +
+    ylab("Estimated ATE")  +
+    theme(legend.title = element_blank(), legend.text = element_text(size=13, face = "bold"), legend.position = "right") +  
+    theme(axis.text = element_text(angle = 0, size=13, face = "bold"))
+ggsave("./fig/toy_example_simplest_expe.pdf", width = 9, height = 5)
+```
+
+# Effect of $n$ and $m$
+
+```{r}
+toy.example.n <- data.frame("n" =  c(),
+                            "m" = c(),
+                            "estimate" = c())
+
+
+for (neff in c(250, 500, 1000, 2000)){
+  for (meff in c(50, 2000)){
+      for (i in 1:1000){
+    
+      simulation <- toy.example(n = neff, m = meff, output.oracles = F, symetric.po = F, noisier.var.X1 = F, factor.var = 0)
+    
+      ipsw.pi.oracle <- ipsw.univariate.and.categorical.X(dataframe = simulation, estimand = "ATE", oracle.e = T, oracle.pt = F, oracle.pr = F)
+      
+      new.row <- data.frame("n" =  c(neff),
+                            "m" = c(meff),
+                            "estimate" = c(ipsw.pi.oracle))
+      
+      toy.example.n <- rbind(toy.example.n, new.row)
+  
+    }
+  }
+  }
+
+
+toy.example.n$n <- as.factor(toy.example.n$n )
+toy.example.n$m <- as.factor(toy.example.n$m )
+```
+
+```{r}
+ggplot(toy.example.n, aes(x = n, y = estimate, fill = m)) +
+  geom_boxplot(alpha = 0.7) + 
+  theme_bw() +
+  theme(legend.text = element_text(size = 15, face = "bold"), legend.position = "top", text = element_text(size = 17, face = "bold")) +
+  ylab("ATE") +
+  xlab("Trial sample's size (n)") +
+  facet_wrap(~m, ncol = 2) +
+  scale_fill_manual("Target sample size (m)",values=c("orange","red"))
+ggsave("./fig/toy_example_2_asympt.pdf", width = 13, height = 5)
+```
+
+# Additional covariates: shifted
+
+Reads the output of `toy-example-shifted-covariates.R`.
+
+```{r}
+shifted.covariates <- read.csv("./results/toy.example.shifted.covariates.csv")
+shifted.covariates$n <- as.factor(shifted.covariates$n)
+```
+
+```{r}
+additional.covariates.modified <- shifted.covariates %>%
+  group_by(covariate.set, pt, pr) %>%
+  summarise(variance = var(estimate)) %>%
+  pivot_wider(names_from = c(covariate.set), values_from = variance)
+
+additional.covariates.modified$inflation <- additional.covariates.modified$Extended / additional.covariates.modified$Minimal
+```
+
+
+```{r}
+additional.covariates.modified$truth <-   (additional.covariates.modified$pt*additional.covariates.modified$pt)/additional.covariates.modified$pr + (1-additional.covariates.modified$pt)*(1-additional.covariates.modified$pt)/(1-additional.covariates.modified$pr)
+
+additional.covariates.modified$borne.sup <- 2*additional.covariates.modified$truth
+```
+
+
+```{r}
+ggplot(additional.covariates.modified, aes(x = pt, y = inflation, color = as.factor(pr), group = as.factor(pr))) +
+  geom_point(size = 4) +
+ geom_line(aes(x = pt, y = truth),  size = 1.9, alpha = 0.6) +
+  #geom_line(aes(x = pt, y = borne.sup), color = "darkblue", size = 0.8, alpha = 0.8, linetype = "dashed") +
+  theme_minimal() +
+  scale_color_manual(expression(p[R](V==1)) ,values=c( "#2A22CD", "#4CCD22")) +
+  ylab("Variance inflation") +
+  theme(legend.position = "top", text = element_text(size = 12, face = "bold")) +
+  xlab(expression(p[T](V==1)))
+ggsave("./fig/shifted_covariates.pdf", width = 5, height = 4)
+```
+
+
+# Additional covariates: treatment effect modifier
+
+Now, consider a situation with multiple covariates. Only $X_1$ is necessary, but we have at disposal 3 additional covariates that are treatment effect modifiers but not shifted.
+
+```{r}
+big.simulation <- simulation.multivariate.categorical.X(n = 50000, m = 50000, output.oracles = T)
+ATE.RCT <- mean(big.simulation[big.simulation$S == 1, "Y_1"]) - mean(big.simulation[big.simulation$S == 1, "Y_0"])
+ATE.Target <- mean(big.simulation[big.simulation$S == 0, "Y_1"]) - mean(big.simulation[big.simulation$S == 0, "Y_0"])
+```
+
+
+```{r}
+result.adding.covariates <- data.frame("estimate" = c(),
+                                       "covariate.set" = c())
+
+for (i in 1:500){
+  simulation <- simulation.multivariate.categorical.X(n = 300, m = 1000, output.oracles = F)
+ 
+  simulation$X2 <- as.factor(simulation$X2)
+  
+  dm <- difference.in.means(simulation, oracle.e.too = F)
+ 
+  tau.hat.minimal <- ipsw.binned(simulation, covariates_names_vector = c("X1"), oracle.e = T, oracle.pt.data = F, oracle.pr = F, outcome_name = "Y", treatment_name = "A")
+  
+  tau.hat.extended <- ipsw.binned(simulation, covariates_names_vector = c("X1", "X2"), oracle.e = T, oracle.pt.data = F, oracle.pr = F, outcome_name = "Y", treatment_name = "A")
+  
+ new.row <- data.frame("estimate" = c(dm, tau.hat.minimal, tau.hat.extended),
+                                       "covariate.set" = c("DM", "minimal", "extended"))
+ 
+ result.adding.covariates <- rbind(result.adding.covariates, new.row)
+}
+
+```
+
+```{r}
+result.adding.covariates$estimator.renamed <- case_when(result.adding.covariates$covariate.set == "DM" ~ "Difference-in-means",
+                                                        result.adding.covariates$covariate.set == "minimal" ~ "Minimal set",
+                                                        result.adding.covariates$covariate.set == "extended" ~ "Extended set")
+
+
+result.adding.covariates$estimator.renamed <- factor(result.adding.covariates$estimator.renamed , levels = c("Difference-in-means", "Minimal set", "Extended set"))
+```
+
+
+```{r}
+ggplot(result.adding.covariates[result.adding.covariates$estimator.renamed != "Difference-in-means",], aes(x =  estimator.renamed, y = estimate, fill = estimator.renamed)) +
+  geom_boxplot(alpha = 0.9, size = 0.7) +
+  geom_hline(aes(yintercept = ATE.Target, color = "ATE in Target population"),  size = 1, linetype = "dashed", color = "#EA471F") +
+  theme_minimal() +
+  scale_fill_manual(values=c("#E69F00", "#BCA4F3")) +
+  theme(legend.title = element_blank(), legend.text = element_text(size = 13, face = "bold"), legend.position = "none", axis.text = element_text(size = 13, face = "bold", color = "black")) +
+  ylab("ATE") +
+  xlab("") 
+ggsave("./fig/toy_precision_covariates.pdf", width = 4.3, height = 4.8)
+```
+
+
+# Asymptotics regimes
+
+Reads output of `finite-sample-toy-example.R`.
+
+```{r}
+asymptotic.regimes <- read.csv("./results/finite.sample.toy.example.csv")
+names(asymptotic.regimes)[names(asymptotic.regimes) == "method"] <- "Regime"
+```
+
+
+```{r}
+asymptotic.regimes$Regime <- case_when(asymptotic.regimes$Regime == "IPSW: m = m" ~ "IPSW: m = n",
+                                       asymptotic.regimes$Regime == "IPSW: n = √m" ~ "IPSW: m = n*n",
+                                       asymptotic.regimes$Regime == "IPSW: n = 2m" ~ "IPSW: m = n/2",
+                                       asymptotic.regimes$Regime == "IPSW: n = m*m" ~ "IPSW: m = √n",
+                                       asymptotic.regimes$Regime == "IPSW: n = m/2" ~ "IPSW: m = 2n",
+                                       asymptotic.regimes$Regime  %in% c("Semi-oracle", "Completely-oracle") ~ asymptotic.regimes$Regime)
+```
+
+
+```{r}
+asymptotic.regimes$IPSW <- ifelse(asymptotic.regimes$Regime == "Completely-oracle" | asymptotic.regimes$Regime == "Semi-oracle", "Completely or semi oracle", "Estimated")
+```
+
+
+```{r}
+risks <- asymptotic.regimes %>%
+  group_by(n,m, Regime, IPSW) %>%
+  summarise(Bias = mean(estimate) - TARGET.ATE, Variance =  var(estimate), Risk = Bias*Bias + Variance)
+```
+
+
+```{r}
+library(paletteer)
+ggplot(risks, aes(x = n, y = Risk, color = Regime, linetype = IPSW)) +
+  geom_line(size = 1.5) +
+  geom_point(size = 4) +
+  theme_minimal() +
+  ylab(expression(paste( "Quadratic error:  ", E((hat(tau)-tau)**2)))) +
+  scale_color_paletteer_d("ggsci::uniform_startrek") +
+   theme(legend.text = element_text(size = 8, face = "bold"), axis.text = element_text(size = 8, face = "bold", color = "black"), legend.position =  "none") +
+  xlab("Trial sample size (n)")
+ggsave("./fig/toy.example.risks.png", width = 4.5, height = 3.7)
+```
+
+
+
+```{r}
+asymptotic.regimes.estimated <- asymptotic.regimes[asymptotic.regimes$IPSW == "Estimated",]%>%
+  group_by(n, m, Regime, IPSW) %>%
+  summarise(Variance = var(estimate)*min(n,m))
+
+asymptotic.regimes.oracle <- asymptotic.regimes[asymptotic.regimes$IPSW != "Estimated",]%>%
+  group_by(n, Regime, IPSW) %>%
+  summarise(Variance = var(estimate)*n)
+
+
+asymptotic.regimes <- rbind(asymptotic.regimes.estimated, asymptotic.regimes.oracle) 
+```
+
+```{r}
+
+ggplot(asymptotic.regimes[asymptotic.regimes$n <300,], aes(x = n, y = Variance, color = Regime, linetype = IPSW)) +
+  geom_line(size = 1.5) +
+  geom_point(size = 4) +
+  theme_minimal() +
+  ylab(expression(paste("min(n,m) ",Var(hat(tau))))) +
+  scale_color_paletteer_d("ggsci::uniform_startrek") +
+   theme(legend.text = element_text(size = 8, face = "bold"), axis.text = element_text(size = 8, face = "bold", color = "black"), legend.position = "left") +
+  xlab("Trial sample size (n)")
+ggsave("./fig/toy.example.regimes.png", width = 4.5, height = 3.5)
+```
+

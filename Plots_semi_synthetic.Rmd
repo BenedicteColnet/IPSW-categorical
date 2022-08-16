@@ -1,0 +1,127 @@
+---
+title: "Plots & Figures: Semi-synthetic simulations"
+author:
+  - Bénédicte Colnet [Inria, Paris-Saclay]
+date: "August 2022"
+output:
+  html_document:
+    code_folding: "hide"
+    number_sections: no
+    toc: yes
+    toc_depth: 2
+  pdf_document:
+    toc: yes
+abstract: | 
+  This script reproduces all the plots from the paper entitled "Reweighting the RCT for generalization: finite sample analysis and variable selection". The data sources stored in data, are generated from real data that can not be shared for privacy reasons. For simulations, data are generated with separate scripts and outputs are stored in the folder entitled "results". This notebook only reads these results except for small additional illustrative Figures or simulations.
+---
+ 
+```{r setup, include=T}
+knitr::opts_chunk$set(echo = TRUE)
+
+set.seed(123)
+
+# libraries
+library(MASS) # simulations
+library(ggplot2) # plots
+library(tidyr) # pivot longer or wider
+library(dplyr) # case_when and others
+library(ggridges)
+
+source("./estimators.R")
+source("./generateDGPs.R")
+
+options(dplyr.summarise.inform = FALSE)
+
+# Load all data necessary for semi-synthetic simulation
+load("./data/semi-synthetic-DGP.rds")
+load("./data/semi-synthetic-oracle-target.rds")
+load("./data/semi-synthetic-oracle-trial.rds")
+
+# Covariates needed
+MINIMAL_SET <- c("time_to_treatment.categorized", "systolicBloodPressure.categorized")
+EXTENDED_PRECISION_SET <- c("time_to_treatment.categorized", "X.treatment.effect.modifier", "systolicBloodPressure.categorized")
+EXTENDED_SHIFTED_SET <- c("time_to_treatment.categorized",  "Glasgow.initial")
+```
+
+```{r}
+# Ground truth
+ground.truth <-  simulation.semi.synthetic(source.data = total.with.overlap, generate.associated.ground.truth = T, output.oracles = TRUE)
+
+TARGET.ATE <- mean(ground.truth[ground.truth$S == 0, "Y_1"]) - mean(ground.truth[ground.truth$S == 0, "Y_0"])
+TARGET.ATE
+
+RCT.ATE <- mean(ground.truth[ground.truth$S == 1, "Y_1"]) - mean(ground.truth[ground.truth$S == 1, "Y_0"])
+RCT.ATE
+```
+
+# Simple simulation to illustrate it works and compare $\pi$ and $\hat \pi$
+
+```{r}
+semi.synth.pi.hat.or.not <- data.frame("estimate" = c(),
+                                        "estimator" = c())
+
+
+for (i in 1:500){
+  
+  # generate data
+  simulation <- simulation.semi.synthetic(n = 1000, m = 10000, extra.noise.on.high.ttt = T, source.data = total.with.overlap)
+  
+  ipsw.pi.oracle <- ipsw.binned(dataframe = simulation, covariates_names_vector = MINIMAL_SET, oracle.e = T, oracle.pt = F, oracle.pr = F)
+  
+  ipsw.pi.hat <- ipsw.binned(dataframe = simulation, covariates_names_vector = MINIMAL_SET, oracle.e = F, oracle.pt = F, oracle.pr = F)
+  
+  ht <- difference.in.means(dataframe = simulation, estimand = "ATE", oracle.e.too = T)
+  
+  dm  <- difference.in.means(dataframe = simulation, estimand = "ATE", oracle.e.too = F)
+  
+  
+  new.row <- data.frame("estimate" = c(ipsw.pi.oracle, ipsw.pi.hat, ht, dm),
+                        "estimator" = c("IPSW - (Definition 6)", "IPSW - (Definition 9)", "Horvitz-Thomson", "Difference-in-means"))
+  
+  semi.synth.pi.hat.or.not <- rbind(semi.synth.pi.hat.or.not, new.row)
+}
+```
+
+```{r}
+ggplot(semi.synth.pi.hat.or.not, aes(x = estimator, y = estimate, fill = estimator)) +
+  geom_boxplot(alpha = 0.8, size = 0.9) +
+   geom_hline(aes(yintercept = TARGET.ATE, color = "Population ATE"), 
+               size = 1.1, linetype="dashed") +
+  geom_hline(aes(yintercept = RCT.ATE, color = "Trial ATE"), 
+               size = 1.1, linetype="dashed") +
+  theme_minimal() +
+  scale_fill_manual(values=c("#999999", "#D1CFCE", "#E69F00", "#EC420B")) +
+  theme(legend.title = element_blank(), legend.text = element_text(size=10, face = "bold"), legend.position = "right") +
+  ylab("ATE") +
+  xlab("") 
+
+ggsave("./fig/semi_synth_pi_hat_or_not.png", width = 8, height = 4)
+```
+
+# Additional covariates shifted
+
+```{r}
+additional.covariates.shifted <- read.csv("./results/semi.synthetic.shifted.csv")
+```
+
+
+```{r}
+additional.covariates.shifted$covariate.set <- case_when(additional.covariates.shifted$covariate.set == "Extended - Precision" ~ "Minimal set \n + treatment effect modifiers",
+  additional.covariates.shifted$covariate.set ==  "Minimal" ~ "Minimal set",
+  additional.covariates.shifted$covariate.set ==  "Extended shifted" ~ "Minimal set \n + shifted covariate")
+
+additional.covariates.shifted$covariate.set <- factor(additional.covariates.shifted$covariate.set , levels = c("Minimal set \n + shifted covariate", "Minimal set", "Minimal set \n + treatment effect modifiers"))
+```
+
+
+```{r}
+ggplot(additional.covariates.shifted, aes(x = covariate.set, y = estimate, fill = covariate.set)) +
+  geom_boxplot() +
+  theme_minimal() +
+  scale_fill_manual(values=c("#4CCD22", "#E69F00", "#BCA4F3")) +
+  theme(legend.title = element_blank(), legend.text = element_text(size = 7, face = "bold"), legend.position = "none", axis.text = element_text(size = 9, face = "bold", color = "black")) +
+  ylab("ATE") +
+  xlab("") +
+  ylim(10,50)
+ggsave("./fig/semi_synth_add_covariates.pdf", width = 5, height = 4)
+```
